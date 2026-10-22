@@ -43,6 +43,7 @@
 #define FINGER_RX 17
 #define FINGER_TX 16
 #define FINGER_POLL_MS 200   // time between finger checks: asked non-stop, the sensor never reads the finger
+#define FINGERPRINT_SAME_IMAGE 0x17   // sensor's search answer when the finger was not lifted (or put back too fast) since the last scan
 
 int unauthorizedCount = 0;
 
@@ -81,6 +82,7 @@ bool mSweepDone = false, aSweepDone = false;
 unsigned long lastScreenUpdate = 0;
 unsigned long holdUntil = 0;        // a scan result stays on the screen (and scanning pauses) until this time
 unsigned long lastFingerPoll = 0;
+bool waitFingerLift = false;        // a finger was just scanned: the next scan needs it lifted first
 unsigned long lastReconnectAttempt = 0;
 unsigned long lastWebRequest = 0;   // last time a web page was opened (tells if the setup hotspot is really in use)
 bool wifiWasOnline = false;
@@ -1017,6 +1019,7 @@ void handleTelegramMessage(const String& sid, const String& txt) {
       report += "🌐 *IP Address:* `" + WiFi.localIP().toString() + "`\n";
       report += "⏳ *Uptime:* " + String(t_hr) + "h " + String(t_min) + "m\n";
       report += "👥 *Students Stored:* " + String(sCount) + " / " + String(MAX_STUDENTS) + "\n";
+      clearSensorReplies();
       if (finger.getTemplateCount() == FINGERPRINT_OK) report += "🖐 *Fingerprint Sensor:* OK (" + String(finger.templateCount) + " fingerprints saved)\n";
       else report += "🖐 *Fingerprint Sensor:* NOT ANSWERING (check its wires)\n";
 
@@ -1765,7 +1768,15 @@ void setupWeb() {
   });
 }
 
+// Throws away sensor answers that came too late. The library takes the next answer
+// waiting from the sensor as the reply to a new command, so one late answer would
+// make every command after it read the wrong reply until the device restarts.
+void clearSensorReplies() {
+  while (fingerSerial.available()) fingerSerial.read();
+}
+
 void enrollFinger() {
+  clearSensorReplies();
   int p = -1; show("ENROLL", "Place finger...");
   while (p != FINGERPRINT_OK) { p = finger.getImage(); if (digitalRead(BTN_BACK) == LOW) return; }
   finger.image2Tz(1); show("ENROLL", "Remove finger"); delay(2000); p = 0;
@@ -1780,6 +1791,7 @@ void enrollFinger() {
 
 void deleteFinger() {
   show("DELETING", "ID: " + String(targetID));
+  clearSensorReplies();
   if (finger.deleteModel(targetID) == FINGERPRINT_OK) show("DELETED", "ID: " + String(targetID));
   else show("ERROR", "Failed");
   delay(2000); currentMode = IDLE;
@@ -1942,19 +1954,28 @@ void loop() {
     // Check for a finger when the last scan result is not on the screen anymore,
     // with a short rest for the sensor between checks
     if (!screenHeld() && millis() - lastFingerPoll >= FINGER_POLL_MS) {
+      clearSensorReplies();   // each check starts in step with the sensor, even after a late answer
       uint8_t p = finger.getImage();
       if (p == FINGERPRINT_TIMEOUT || p == FINGERPRINT_BADPACKET || p == FINGERPRINT_PACKETRECIEVEERR) {
         // The sensor's answer did not reach the ESP32 (loose wire on GPIO 17, or weak power)
         show("SENSOR ERROR", "No reply from the", "fingerprint sensor.", "Check its wires.");
         holdScreen(2000);
       }
-      else if (p == FINGERPRINT_OK) {
+      else if (p == FINGERPRINT_NOFINGER) waitFingerLift = false;
+      else if (p == FINGERPRINT_OK && !waitFingerLift) {
+        uint8_t s;
         if (finger.image2Tz() != FINGERPRINT_OK) {
           show("TRY AGAIN", "Finger not clear.", "Press it flat and", "hold still.");
           holdScreen(1500);
         }
-        else if (finger.fingerSearch() == FINGERPRINT_OK) { unauthorizedCount = 0; markAttendance(finger.fingerID); }
+        else if ((s = finger.fingerSearch()) == FINGERPRINT_OK) { waitFingerLift = true; unauthorizedCount = 0; markAttendance(finger.fingerID); }
+        else if (s == FINGERPRINT_SAME_IMAGE) {
+          waitFingerLift = true;
+          show("TRY AGAIN", "Lift your finger,", "wait a second, then", "place it again.");
+          holdScreen(1500);
+        }
         else {
+          waitFingerLift = true;
           unauthorizedCount++; show("DENIED", "Unknown", "Att: " + String(unauthorizedCount));
           if (unauthorizedCount >= 3) {
             updateTime(); tgSend(teacherID, "🚨 *SECURITY ALERT* at " + getTimeStr(), "Markdown");
