@@ -314,15 +314,14 @@ uint8_t statusCode(const String& s) {
 }
 
 uint16_t timeCode(const String& t) {
-  if (t.length() != 5 || t[2] != ':') return 0xFFFF;
-  return t.substring(0, 2).toInt() * 60 + t.substring(3).toInt();
+  int h, m;
+  if (!parseTime(t, h, m)) return 0xFFFF;
+  return h * 60 + m;
 }
 
 String timeText(uint16_t v) {
   if (v == 0xFFFF) return "--";
-  char b[6];
-  snprintf(b, sizeof(b), "%02d:%02d", v / 60, v % 60);
-  return String(b);
+  return timeOf(v / 60, v % 60);
 }
 
 void saveAttendance() {
@@ -481,10 +480,10 @@ uint32_t todayKey() { return (uint32_t)yr * 10000 + mo * 100 + dy; }
 
 bool atOrAfter(int h, int m) { return hr > h || (hr == h && mn >= m); }
 
-// A time as HH:MM (12:00, not 12:0).
+// A time on the 12-hour clock: 7:05 AM, 12:30 PM, 4:35 PM.
 String timeOf(int h, int m) {
-  char buf[6];
-  snprintf(buf, sizeof(buf), "%02d:%02d", h, m);
+  char buf[10];
+  snprintf(buf, sizeof(buf), "%d:%02d %s", h % 12 == 0 ? 12 : h % 12, m, h < 12 ? "AM" : "PM");
   return String(buf);
 }
 
@@ -500,8 +499,9 @@ void show(const String& head, const String& l1, const String& l2 = "", const Str
   display.clearDisplay();
   display.setTextSize(1); display.setCursor(0, 0);
   display.print(WiFi.status() == WL_CONNECTED ? "WiFi:OK" : "WiFi:LOST");
-  display.setCursor(80, 0);
-  display.print(getTimeStr());
+  String now = getTimeStr();
+  display.setCursor(128 - now.length() * 6, 0);   // right edge (each letter is 6 pixels wide)
+  display.print(now);
   display.drawLine(0, 9, 128, 9, SH110X_WHITE);
   display.setCursor(0, 12); display.println(head);
   display.println("--------------------");
@@ -549,22 +549,27 @@ bool readStudentFields(const String& text, bool lrnFirst, String& name, String& 
   return name != "" && isValidChatID(lrn) && lrn[0] != '-' && (parent == "" || isValidChatID(parent));
 }
 
-// Reads a time written as 7:20 or 07:20. False if it isn't a real time.
+// Reads a time written as 7:20 AM, 4:30 PM, 7:20 or 16:30 (no AM/PM: 24-hour clock).
+// False if it isn't a real time.
 bool parseTime(const String& text, int& h, int& m) {
-  String t = text; t.trim();
+  String t = text; t.trim(); t.toUpperCase();
+  int half = 0;   // 1 = AM, 2 = PM, 0 = not given
+  if (t.endsWith("AM")) half = 1; else if (t.endsWith("PM")) half = 2;
+  if (half) { t.remove(t.length() - 2); t.trim(); }
   int c = t.indexOf(':');
   if (c < 1 || c > 2 || (int)t.length() != c + 3) return false;
   for (int i = 0; i < (int)t.length(); i++) if (i != c && !isDigit(t[i])) return false;
   int hh = t.substring(0, c).toInt(), mm = t.substring(c + 1).toInt();
-  if (hh > 23 || mm > 59) return false;
+  if (mm > 59 || (half ? hh < 1 || hh > 12 : hh > 23)) return false;
+  if (half) hh = hh % 12 + (half == 2 ? 12 : 0);   // 12:30 AM -> 0:30, 4:30 PM -> 16:30
   h = hh; m = mm;
   return true;
 }
 
-// /setlate_am 7:20 and the other schedule commands
+// /setlate_am 7:20 AM and the other schedule commands
 void setTimeCommand(const String& arg, int& h, int& m, const String& label, const String& cmd) {
   if (!parseTime(arg, h, m)) {
-    tgSend(teacherID, "Format: " + cmd + " HH:MM (example: " + cmd + " 7:20)", "");
+    tgSend(teacherID, "Format: " + cmd + " H:MM AM/PM (example: " + cmd + " 7:20 AM)", "");
     return;
   }
   saveSettings();
@@ -805,25 +810,28 @@ void telegramTask(void*) {
   }
 }
 
-void sendParentAlert(int type, Student &s) {
+// morning: the alert is for the AM session (false: PM session)
+void sendParentAlert(int type, Student &s, bool morning) {
   String dateStr = getDateStr();
+  String session = morning ? "morning (AM)" : "afternoon (PM)";
+  String tag = morning ? " (AM)" : " (PM)";
   String parentMsg = "Good day, Parent/Guardian.\nDate: " + dateStr + "\nThis is to inform you that your child, " + s.name + " (LRN: " + s.lrn + "), ";
   String teacherMsg = "📑 *ATTENDANCE REPORT*\nDate: " + dateStr + "\nStudent: " + s.name + "\nLRN: " + s.lrn + "\nEvent: ";
 
   if (type == 0) {
-    String lateTime = (hr < 12 ? s.tInM : s.tInA);
-    parentMsg += "arrived LATE today at " + lateTime + ".\nKindly remind them to come to school on time. Thank you.";
-    teacherMsg += "🔴 *LATE IN* at " + lateTime;
+    String lateTime = (morning ? s.tInM : s.tInA);
+    parentMsg += "arrived LATE for the " + session + " session at " + lateTime + ".\nKindly remind them to come to school on time. Thank you.";
+    teacherMsg += "🔴 *LATE IN" + tag + "* at " + lateTime;
   }
-  else if (type == 1) { parentMsg += "was marked ABSENT today."; teacherMsg += "❌ *ABSENT*"; }
-  else if (type == 2) { parentMsg += "did not time-out today."; teacherMsg += "⚠️ *NO TIME-OUT*"; }
+  else if (type == 1) { parentMsg += "was marked ABSENT for the " + session + " session today."; teacherMsg += "❌ *ABSENT" + tag + "*"; }
+  else if (type == 2) { parentMsg += "did not time-out for the " + session + " session today."; teacherMsg += "⚠️ *NO TIME-OUT" + tag + "*"; }
   else if (type == 3) {   // arrived on time: parent only
-    String inTime = (hr < 12 ? s.tInM : s.tInA);
-    parentMsg += "has arrived at school and is marked PRESENT today.\nTime in: " + inTime + "\nThank you.";
+    String inTime = (morning ? s.tInM : s.tInA);
+    parentMsg += "has arrived at school and is marked PRESENT for the " + session + " session.\nTime in: " + inTime + "\nThank you.";
   }
   else if (type == 4) {   // timed out: parent only
-    String outTime = (hr < 12 ? s.tOutM : s.tOutA);
-    parentMsg += "has timed out and left school today.\nTime out: " + outTime + "\nThank you.";
+    String outTime = (morning ? s.tOutM : s.tOutA);
+    parentMsg += "has timed out and left school after the " + session + " session.\nTime out: " + outTime + "\nThank you.";
   }
 
   if (type < 3) tgSend(teacherID, teacherMsg, "Markdown");
@@ -1114,14 +1122,14 @@ void markAttendance(int id) {
   if (hr < 12) { // Morning Logic
     if (!s.inM) {
         s.inM = true; s.tInM = ts;
-        if (hr > lateH || (hr == lateH && mn >= lateM)) { s.sInM = "Late In"; sendParentAlert(0, s); }
+        if (hr > lateH || (hr == lateH && mn >= lateM)) { s.sInM = "Late In"; sendParentAlert(0, s, true); }
         else s.sInM = "On Time";
         show("SUCCESS", s.name, "AM IN: " + ts);
-        if (s.sInM == "On Time") sendParentAlert(3, s);   // tell the parent the child arrived
+        if (s.sInM == "On Time") sendParentAlert(3, s, true);   // tell the parent the child arrived
     } else if (!s.outM) {
       if (hr > dismissH || (hr == dismissH && mn >= dismissM)) {
         s.outM = true; s.tOutM = ts; s.sOutM = "Timed Out"; show("SUCCESS", s.name, "AM OUT: " + ts);
-        sendParentAlert(4, s);   // tell the parent the child left
+        sendParentAlert(4, s, true);   // tell the parent the child left
       } else {
         show("EARLY", "Dismissal at:", timeOf(dismissH, dismissM));
       }
@@ -1132,14 +1140,14 @@ void markAttendance(int id) {
   else { // Afternoon Logic
     if (!s.inA) {
         s.inA = true; s.tInA = ts;
-        if (hr > lateH_PM || (hr == lateH_PM && mn >= lateM_PM)) { s.sInA = "Late In"; sendParentAlert(0, s); }
+        if (hr > lateH_PM || (hr == lateH_PM && mn >= lateM_PM)) { s.sInA = "Late In"; sendParentAlert(0, s, false); }
         else s.sInA = "On Time";
         show("SUCCESS", s.name, "PM IN: " + ts);
-        if (s.sInA == "On Time") sendParentAlert(3, s);   // tell the parent the child arrived
+        if (s.sInA == "On Time") sendParentAlert(3, s, false);   // tell the parent the child arrived
     } else if (!s.outA) {
       if (hr > dismissH_PM || (hr == dismissH_PM && mn >= dismissM_PM)) {
         s.outA = true; s.tOutA = ts; s.sOutA = "Timed Out"; show("SUCCESS", s.name, "PM OUT: " + ts);
-        sendParentAlert(4, s);   // tell the parent the child left
+        sendParentAlert(4, s, false);   // tell the parent the child left
       } else {
         show("EARLY", "Dismissal at:", timeOf(dismissH_PM, dismissM_PM));
       }
@@ -1169,11 +1177,11 @@ void runSweep(bool morning) {
   if (held) {
     for (int i = 0; i < sCount; i++) {
       if (morning) {
-        if (!st[i].inM) { st[i].sInM = "Absent"; st[i].sOutM = "Absent"; sendParentAlert(1, st[i]); }
-        else if (!st[i].outM) { st[i].sOutM = "No Time Out"; sendParentAlert(2, st[i]); }
+        if (!st[i].inM) { st[i].sInM = "Absent"; st[i].sOutM = "Absent"; sendParentAlert(1, st[i], true); }
+        else if (!st[i].outM) { st[i].sOutM = "No Time Out"; sendParentAlert(2, st[i], true); }
       } else {
-        if (!st[i].inA) { st[i].sInA = "Absent"; st[i].sOutA = "Absent"; sendParentAlert(1, st[i]); }
-        else if (!st[i].outA) { st[i].sOutA = "No Time Out"; sendParentAlert(2, st[i]); }
+        if (!st[i].inA) { st[i].sInA = "Absent"; st[i].sOutA = "Absent"; sendParentAlert(1, st[i], false); }
+        else if (!st[i].outA) { st[i].sOutA = "No Time Out"; sendParentAlert(2, st[i], false); }
       }
     }
   }
