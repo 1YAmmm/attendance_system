@@ -2,6 +2,7 @@
 #include <WiFiClientSecure.h>
 #include <WebServer.h>
 #include <DNSServer.h>
+#include <ESPmDNS.h>
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SH110X.h>
@@ -31,6 +32,9 @@
 #define SETUP_AP_NAME "Attendance-Setup"
 #define SETUP_AP_PASSWORD "12345678"   // at least 8 characters
 #define HOTSPOT_AFTER_SECONDS 60
+// The website also opens at http://attendance.local on laptops and iPhones (many Android
+// phones can't open .local names: use the IP address the bot sends instead).
+#define DEVICE_NAME "attendance"
 
 // -------------------- SYSTEM SETTINGS --------------------
 #define MAX_STUDENTS 45
@@ -89,6 +93,7 @@ unsigned long lastWebRequest = 0;   // last time a web page was opened (tells if
 bool wifiWasOnline = false;
 unsigned long wifiLostAt = 0;       // when the WiFi was lost
 bool wifiRetryNow = false;          // "Try Again Now" was pressed on the WiFi page
+String lastIP = "";                 // website address last sent to the teacher
 
 // Configuration Variables
 int lateH = 7, lateM = 20;
@@ -207,14 +212,15 @@ void saveSettings() {
   prefs.end();
 }
 
+// Times not saved yet keep the values set under "Configuration Variables" (the system document's times).
 void loadSettings() {
   prefs.begin("att-cfg", true);
-  lateH = prefs.getInt("lh", 7); lateM = prefs.getInt("lm", 20);
-  lateH_PM = prefs.getInt("lh_pm", 13); lateM_PM = prefs.getInt("lm_pm", 20);
-  dismissH = prefs.getInt("dh", 12); dismissM = prefs.getInt("dm", 0);
-  dismissH_PM = prefs.getInt("dh_pm", 16); dismissM_PM = prefs.getInt("dm_pm", 30);
-  sweepH_AM = prefs.getInt("sh_am", 12); sweepM_AM = prefs.getInt("sm_am", 0);
-  sweepH_PM = prefs.getInt("sh_pm", 17); sweepM_PM = prefs.getInt("sm_pm", 0);
+  lateH = prefs.getInt("lh", lateH); lateM = prefs.getInt("lm", lateM);
+  lateH_PM = prefs.getInt("lh_pm", lateH_PM); lateM_PM = prefs.getInt("lm_pm", lateM_PM);
+  dismissH = prefs.getInt("dh", dismissH); dismissM = prefs.getInt("dm", dismissM);
+  dismissH_PM = prefs.getInt("dh_pm", dismissH_PM); dismissM_PM = prefs.getInt("dm_pm", dismissM_PM);
+  sweepH_AM = prefs.getInt("sh_am", sweepH_AM); sweepM_AM = prefs.getInt("sm_am", sweepM_AM);
+  sweepH_PM = prefs.getInt("sh_pm", sweepH_PM); sweepM_PM = prefs.getInt("sm_pm", sweepM_PM);
   prefs.end();
 }
 
@@ -475,11 +481,14 @@ uint32_t todayKey() { return (uint32_t)yr * 10000 + mo * 100 + dy; }
 
 bool atOrAfter(int h, int m) { return hr > h || (hr == h && mn >= m); }
 
-String getTimeStr() {
+// A time as HH:MM (12:00, not 12:0).
+String timeOf(int h, int m) {
   char buf[6];
-  snprintf(buf, sizeof(buf), "%02d:%02d", hr, mn);
+  snprintf(buf, sizeof(buf), "%02d:%02d", h, m);
   return String(buf);
 }
+
+String getTimeStr() { return timeOf(hr, mn); }
 
 String getDateStr() {
   char buf[12];
@@ -519,6 +528,47 @@ int splitFields(const String& s, String out[], int maxParts) {
   }
   for (int i = 0; i < n; i++) out[i].trim();
   return n;
+}
+
+// Reads Name,LRN,ParentID[,Sex] (lrnFirst = false, /addstudent) or LRN,Name,ParentID[,Sex]
+// (lrnFirst = true, /editstudent). A name may contain commas (DELA CRUZ, JUAN), so the parent ID
+// and sex are counted from the end. Sex is '?' when not given. False if something is missing
+// or the LRN or parent ID is not a number.
+bool readStudentFields(const String& text, bool lrnFirst, String& name, String& lrn, String& parent, char& sex) {
+  String f[12];
+  int n = splitFields(text, f, 12);
+  sex = n >= 4 ? parseSex(f[n - 1]) : '?';
+  int p = sex != '?' ? n - 2 : n - 1;   // the parent ID
+  int first = lrnFirst ? 1 : 0;         // the name is f[first .. last]
+  int last = lrnFirst ? p - 1 : p - 2;
+  if (last < first) return false;
+  parent = f[p];
+  lrn = lrnFirst ? f[0] : f[p - 1];
+  name = f[first];
+  for (int i = first + 1; i <= last; i++) name += ", " + f[i];
+  return name != "" && isValidChatID(lrn) && lrn[0] != '-' && (parent == "" || isValidChatID(parent));
+}
+
+// Reads a time written as 7:20 or 07:20. False if it isn't a real time.
+bool parseTime(const String& text, int& h, int& m) {
+  String t = text; t.trim();
+  int c = t.indexOf(':');
+  if (c < 1 || c > 2 || (int)t.length() != c + 3) return false;
+  for (int i = 0; i < (int)t.length(); i++) if (i != c && !isDigit(t[i])) return false;
+  int hh = t.substring(0, c).toInt(), mm = t.substring(c + 1).toInt();
+  if (hh > 23 || mm > 59) return false;
+  h = hh; m = mm;
+  return true;
+}
+
+// /setlate_am 7:20 and the other schedule commands
+void setTimeCommand(const String& arg, int& h, int& m, const String& label, const String& cmd) {
+  if (!parseTime(arg, h, m)) {
+    tgSend(teacherID, "Format: " + cmd + " HH:MM (example: " + cmd + " 7:20)", "");
+    return;
+  }
+  saveSettings();
+  tgSend(teacherID, label + " set to " + timeOf(h, m), "");
 }
 
 int findByLRN(const String& lrn) {
@@ -771,8 +821,12 @@ void sendParentAlert(int type, Student &s) {
     String inTime = (hr < 12 ? s.tInM : s.tInA);
     parentMsg += "has arrived at school and is marked PRESENT today.\nTime in: " + inTime + "\nThank you.";
   }
+  else if (type == 4) {   // timed out: parent only
+    String outTime = (hr < 12 ? s.tOutM : s.tOutA);
+    parentMsg += "has timed out and left school today.\nTime out: " + outTime + "\nThank you.";
+  }
 
-  if (type != 3) tgSend(teacherID, teacherMsg, "Markdown");
+  if (type < 3) tgSend(teacherID, teacherMsg, "Markdown");
   if (s.telID != "0" && s.telID != "") tgSend(s.telID, parentMsg, "");
 }
 
@@ -832,18 +886,17 @@ void handleTelegramMessage(const String& sid, const String& txt) {
     }
     // --- END OF NEW COMMANDS ---
     else if (txt.startsWith("/addstudent ")) {
-      String f[4];
-      int n = splitFields(txt.substring(12), f, 4);
-      if (n < 3 || f[0] == "" || f[1] == "") {
-        tgSend(teacherID, "Format: /addstudent Name,LRN,ParentID,Sex\nExample: /addstudent DELA CRUZ JUAN SANTOS,123456789012,987654321,M", "");
+      String name, lrn, parent; char sex;
+      if (!readStudentFields(txt.substring(12), false, name, lrn, parent, sex)) {
+        tgSend(teacherID, "Format: /addstudent Name,LRN,ParentID,Sex\nExample: /addstudent DELA CRUZ, JUAN SANTOS,123456789012,987654321,M\n(LRN and ParentID are numbers; use 0 if there is no parent ID yet)", "");
       } else if (sCount >= MAX_STUDENTS) {
         tgSend(teacherID, "⚠️ Class list is full (" + String(MAX_STUDENTS) + " students).", "");
-      } else if (findByLRN(f[1]) >= 0) {
-        tgSend(teacherID, "⚠️ A student with LRN " + f[1] + " is already on the list.", "");
+      } else if (findByLRN(lrn) >= 0) {
+        tgSend(teacherID, "⚠️ A student with LRN " + lrn + " is already on the list.", "");
       } else {
         int k = sCount;
-        st[k].name = f[0]; st[k].lrn = f[1]; st[k].telID = f[2];
-        st[k].sex = n >= 4 ? parseSex(f[3]) : '?';
+        st[k].name = name; st[k].lrn = lrn; st[k].telID = parent;
+        st[k].sex = sex;
         resetDayFields(k);
         sCount++;
         saveStudents();
@@ -859,14 +912,13 @@ void handleTelegramMessage(const String& sid, const String& txt) {
       }
     }
     else if (txt.startsWith("/editstudent ")) {
-      String f[4];
-      int n = splitFields(txt.substring(13), f, 4);
-      int j = n >= 3 ? findByLRN(f[0]) : -1;
+      String name, lrn, parent; char sex;
+      int j = readStudentFields(txt.substring(13), true, name, lrn, parent, sex) ? findByLRN(lrn) : -1;
       if (j < 0) {
-        tgSend(teacherID, "Format: /editstudent LRN,Name,ParentID (LRN must already be on the list)", "");
+        tgSend(teacherID, "Format: /editstudent LRN,Name,ParentID,Sex (LRN must already be on the list; Sex is optional)", "");
       } else {
-        st[j].name = f[1]; st[j].telID = f[2];
-        if (n >= 4) st[j].sex = parseSex(f[3]);
+        st[j].name = name; st[j].telID = parent;
+        if (sex != '?') st[j].sex = sex;
         saveStudents(); tgSend(teacherID, "✅ Updated: " + st[j].name, "");
       }
     }
@@ -901,6 +953,9 @@ void handleTelegramMessage(const String& sid, const String& txt) {
         String reply = "🗑 Removed: " + name + "\nTheir fingerprint was deleted. Students below moved up one number together with their fingerprints, so no re-enrolling is needed.";
         if (failed != "") reply += "\n⚠️ These fingerprint IDs could not be moved:" + failed + ". Re-enroll those students (see /list).";
         tgSend(teacherID, reply, "");
+      }
+      else {
+        tgSend(teacherID, "⚠️ No student with LRN " + tLRN + ". Nothing was removed. Check the LRN with /list.", "");
       }
     }
     else if (txt == "/list") {
@@ -943,30 +998,12 @@ void handleTelegramMessage(const String& sid, const String& txt) {
       }
       tgSend(teacherID, "✅ Bulk status sent to all parents.", "");
     }
-    else if (txt.startsWith("/setlate_am ")) {
-      lateH = txt.substring(12, 14).toInt(); lateM = txt.substring(15, 17).toInt();
-      saveSettings(); tgSend(teacherID, "⏰ AM Late set to " + String(lateH) + ":" + String(lateM), "");
-    }
-    else if (txt.startsWith("/setlate_pm ")) {
-      lateH_PM = txt.substring(12, 14).toInt(); lateM_PM = txt.substring(15, 17).toInt();
-      saveSettings(); tgSend(teacherID, "⏰ PM Late set to " + String(lateH_PM) + ":" + String(lateM_PM), "");
-    }
-    else if (txt.startsWith("/setdismiss_am ")) {
-      dismissH = txt.substring(15, 17).toInt(); dismissM = txt.substring(18, 20).toInt();
-      saveSettings(); tgSend(teacherID, "🔔 AM Dismissal set to " + String(dismissH) + ":" + String(dismissM), "");
-    }
-    else if (txt.startsWith("/setdismiss_pm ")) {
-      dismissH_PM = txt.substring(15, 17).toInt(); dismissM_PM = txt.substring(18, 20).toInt();
-      saveSettings(); tgSend(teacherID, "🔔 PM Dismissal set to " + String(dismissH_PM) + ":" + String(dismissM_PM), "");
-    }
-    else if (txt.startsWith("/setsweep_am ")) {
-      sweepH_AM = txt.substring(13, 15).toInt(); sweepM_AM = txt.substring(16, 18).toInt();
-      saveSettings(); tgSend(teacherID, "🧹 AM Sweep set to " + String(sweepH_AM) + ":" + String(sweepM_AM), "");
-    }
-    else if (txt.startsWith("/setsweep_pm ")) {
-      sweepH_PM = txt.substring(13, 15).toInt(); sweepM_PM = txt.substring(16, 18).toInt();
-      saveSettings(); tgSend(teacherID, "🧹 PM Sweep set to " + String(sweepH_PM) + ":" + String(sweepM_PM), "");
-    }
+    else if (txt.startsWith("/setlate_am ")) setTimeCommand(txt.substring(12), lateH, lateM, "⏰ AM Late", "/setlate_am");
+    else if (txt.startsWith("/setlate_pm ")) setTimeCommand(txt.substring(12), lateH_PM, lateM_PM, "⏰ PM Late", "/setlate_pm");
+    else if (txt.startsWith("/setdismiss_am ")) setTimeCommand(txt.substring(15), dismissH, dismissM, "🔔 AM Dismissal", "/setdismiss_am");
+    else if (txt.startsWith("/setdismiss_pm ")) setTimeCommand(txt.substring(15), dismissH_PM, dismissM_PM, "🔔 PM Dismissal", "/setdismiss_pm");
+    else if (txt.startsWith("/setsweep_am ")) setTimeCommand(txt.substring(13), sweepH_AM, sweepM_AM, "🧹 AM Sweep", "/setsweep_am");
+    else if (txt.startsWith("/setsweep_pm ")) setTimeCommand(txt.substring(13), sweepH_PM, sweepM_PM, "🧹 PM Sweep", "/setsweep_pm");
     else if (txt == "/allstatus") {
       updateTime();
       String rep = "📊 *CLASS STATUS* - " + getDateStr() + "\n\n";
@@ -1084,8 +1121,9 @@ void markAttendance(int id) {
     } else if (!s.outM) {
       if (hr > dismissH || (hr == dismissH && mn >= dismissM)) {
         s.outM = true; s.tOutM = ts; s.sOutM = "Timed Out"; show("SUCCESS", s.name, "AM OUT: " + ts);
+        sendParentAlert(4, s);   // tell the parent the child left
       } else {
-        show("EARLY", "Dismissal at:", String(dismissH) + ":" + String(dismissM));
+        show("EARLY", "Dismissal at:", timeOf(dismissH, dismissM));
       }
     } else {
       show("ALREADY DONE", s.name, "AM IN: " + s.tInM, "AM OUT: " + s.tOutM);
@@ -1101,8 +1139,9 @@ void markAttendance(int id) {
     } else if (!s.outA) {
       if (hr > dismissH_PM || (hr == dismissH_PM && mn >= dismissM_PM)) {
         s.outA = true; s.tOutA = ts; s.sOutA = "Timed Out"; show("SUCCESS", s.name, "PM OUT: " + ts);
+        sendParentAlert(4, s);   // tell the parent the child left
       } else {
-        show("EARLY", "Dismissal at:", String(dismissH_PM) + ":" + String(dismissM_PM));
+        show("EARLY", "Dismissal at:", timeOf(dismissH_PM, dismissM_PM));
       }
     } else {
       show("ALREADY DONE", s.name, "PM IN: " + s.tInA, "PM OUT: " + s.tOutA);
@@ -1914,7 +1953,18 @@ void stopSetupHotspot() {
   setupMode = false;
   show("WIFI", "Connected!", "IP:", WiFi.localIP().toString());
   delay(2000);
-  tgSend(teacherID, "🚀 *Smart Attendance Monitoring System Online.*", "Markdown");
+  sendOnlineMessage();
+}
+
+// The website address, for the teacher's messages.
+String websiteText() {
+  return "🌐 Website: http://" + WiFi.localIP().toString() + "\n(or http://" DEVICE_NAME ".local on laptops and iPhones)";
+}
+
+// Tells the teacher the system is online and where the website is.
+void sendOnlineMessage() {
+  lastIP = WiFi.localIP().toString();
+  tgSend(teacherID, "🚀 *Smart Attendance Monitoring System Online.*\n" + websiteText(), "Markdown");
 }
 
 // Starts a fresh attempt to join the saved WiFi.
@@ -1943,6 +1993,14 @@ bool connectWiFi(int seconds) {
 // Runs each time the WiFi connects (also after it was lost).
 void wifiBackOnline() {
   if (!timeValid) configTime(8 * 3600, 0, "pool.ntp.org");   // set the clock now instead of waiting
+  MDNS.end();   // announce http://attendance.local again on the new connection
+  if (MDNS.begin(DEVICE_NAME)) MDNS.addService("http", "tcp", 80);
+  // The router gave a new address: tell the teacher (closing the setup hotspot sends its own message)
+  String ip = WiFi.localIP().toString();
+  if (!setupMode && lastIP != "" && ip != lastIP) {
+    lastIP = ip;
+    tgSend(teacherID, "The website has a new address.\n" + websiteText(), "");
+  }
 }
 
 void reconnectWiFi() {
@@ -1975,6 +2033,7 @@ void setup() {
   WiFi.persistent(false);       // the WiFi name and password are saved by loadWifiSettings/saveWifiSettings
   WiFi.setAutoReconnect(true);  // let the ESP32 retry by itself when the WiFi drops
   WiFi.setSleep(false);         // WiFi power saving makes the web pages answer slowly
+  WiFi.setHostname(DEVICE_NAME);   // the name the router's device list shows
   loadWifiSettings();
   bool online = connectWiFi(20);
   secured_client.setInsecure();
@@ -2006,12 +2065,13 @@ void setup() {
   }
   setupWeb();
   server.begin();
-  if (online) tgSend(teacherID, "🚀 *Smart Attendance Monitoring System Online.*", "Markdown");
+  if (online) sendOnlineMessage();
   else startSetupHotspot();   // no saved WiFi, or it couldn't connect
 }
 
 void loop() {
   server.handleClient(); scheduler();
+  if (setupMode) dnsServer.processNextRequest();   // answers phones on the setup hotspot so they open the WiFi page
   // -------------------- AUTO-RECONNECT WIFI --------------------
   // The ESP32 retries the WiFi by itself. As a backup, a fresh attempt is started
   // every 30 seconds while the WiFi is down. If the WiFi stays down, the setup
