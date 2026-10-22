@@ -83,6 +83,7 @@ unsigned long lastScreenUpdate = 0;
 unsigned long holdUntil = 0;        // a scan result stays on the screen (and scanning pauses) until this time
 unsigned long lastFingerPoll = 0;
 bool waitFingerLift = false;        // a finger was just scanned: the next scan needs it lifted first
+enum WaitResult { WAIT_OK, WAIT_CANCELLED, WAIT_TIMEOUT, WAIT_NO_SENSOR };   // see waitForFinger()
 unsigned long lastReconnectAttempt = 0;
 unsigned long lastWebRequest = 0;   // last time a web page was opened (tells if the setup hotspot is really in use)
 bool wifiWasOnline = false;
@@ -106,21 +107,7 @@ struct Student {
 };
 
 Student st[MAX_STUDENTS];
-int sCount = 0;
-
-// Default class list (loaded only when the memory is empty)
-struct DefaultStudent { const char* name; const char* lrn; const char* telID; char sex; };
-const DefaultStudent DEFAULT_STUDENTS[] = {
-  {"MARIE BETH LUGA FELICITAS", "136501140064", "5395191575", 'F'},
-  {"ISAAC TOTTO DE CASTRO", "103145130220", "8312573138", 'M'},
-  {"ISIAH ZEUS RAMOS", "415548150055", "6875526922", 'M'},
-  {"SEAN ANDREW ALVARADO", "103145140146", "8200309411", 'M'},
-  {"JULIANNA ANGELA BATUGAL", "415509150913", "6368958172", 'F'},
-  {"STACEY RAVEN MANAGUELOD", "103884140356", "7220640882", 'F'},
-  {"RIO CHERIZZA BAUI VELASCO", "103742140039", "8748559991", 'F'},
-  {"DION VHIER AGGABAO ESPEJO", "103161130011", "6125717352", 'M'},
-};
-const int DEFAULT_COUNT = sizeof(DEFAULT_STUDENTS) / sizeof(DEFAULT_STUDENTS[0]);
+int sCount = 0;   // the class starts empty: students are added with /addstudent
 
 // -------------------- SAVED RECORD FORMATS --------------------
 // Today's attendance, saved as one block so it survives a restart.
@@ -306,23 +293,10 @@ void loadStudents() {
     st[i].lrn = prefs.getString(("l" + String(i)).c_str(), "");
     st[i].telID = prefs.getString(("t" + String(i)).c_str(), "");
     st[i].sex = '?';
-    for (int d = 0; d < DEFAULT_COUNT; d++) {
-      if (st[i].lrn == DEFAULT_STUDENTS[d].lrn) st[i].sex = DEFAULT_STUDENTS[d].sex;
-    }
   }
   prefs.end();
 
-  if (oldCount > 0) {
-    sCount = oldCount;
-  } else {
-    for (int i = 0; i < DEFAULT_COUNT; i++) {
-      st[i].name = DEFAULT_STUDENTS[i].name;
-      st[i].lrn = DEFAULT_STUDENTS[i].lrn;
-      st[i].telID = DEFAULT_STUDENTS[i].telID;
-      st[i].sex = DEFAULT_STUDENTS[i].sex;
-    }
-    sCount = DEFAULT_COUNT;
-  }
+  sCount = oldCount;   // 0 when there is no old list: the class starts empty
   saveStudents();
   prefs.begin("att-system", false); prefs.clear(); prefs.end();   // free the old entries
 }
@@ -843,6 +817,7 @@ void handleTelegramMessage(const String& sid, const String& txt) {
       h += "• Settings page: http://" + WiFi.localIP().toString() + "/settings\n";
       h += "• `/reboot` - Restart System\n";
       h += "• `/factoryreset` - Wipe Memory\n";
+      h += "• `/clearall` - Delete all students and fingerprints\n";
 
       tgSend(teacherID, h, "Markdown");
     }
@@ -911,13 +886,21 @@ void handleTelegramMessage(const String& sid, const String& txt) {
     else if (txt.startsWith("/removestudent ")) {
       String tLRN = txt.substring(15); tLRN.trim();
       int j = findByLRN(tLRN);
-      if (j >= 0) {
+      clearSensorReplies();
+      if (j >= 0 && !finger.verifyPassword()) {
+        tgSend(teacherID, "⚠️ The fingerprint sensor is not answering, so nothing was removed. Check its wires and try again.", "");
+      }
+      else if (j >= 0) {
+        String name = st[j].name;
+        String failed = removeFingerprint(j);
         for(int k=j; k<sCount-1; k++) st[k] = st[k+1];
         sCount--;
         resetDayFields(sCount);
         saveStudents(); saveAttendance();
         removeStudentFromMonths(j);
-        tgSend(teacherID, "🗑 Student Removed. Students below moved up one number, so re-enroll their fingerprints.", "");
+        String reply = "🗑 Removed: " + name + "\nTheir fingerprint was deleted. Students below moved up one number together with their fingerprints, so no re-enrolling is needed.";
+        if (failed != "") reply += "\n⚠️ These fingerprint IDs could not be moved:" + failed + ". Re-enroll those students (see /list).";
+        tgSend(teacherID, reply, "");
       }
     }
     else if (txt == "/list") {
@@ -1004,6 +987,28 @@ void handleTelegramMessage(const String& sid, const String& txt) {
       tgSend(teacherID, "⚠️ *Memory Cleared.* Rebooting...", "Markdown");
       tgFlush(10000);   // let the message go out first
       ESP.restart();
+    }
+    else if (txt == "/clearall") {
+      tgSend(teacherID, "⚠️ This deletes ALL students, ALL fingerprints on the sensor, today's attendance and the SF2 records.\n"
+                        "WiFi, bot, school details and time settings are kept.\n\nSend /clearall YES to confirm.", "");
+    }
+    else if (txt.equalsIgnoreCase("/clearall yes")) {
+      show("CLEARING", "Deleting students", "and fingerprints...");
+      clearSensorReplies();
+      if (finger.emptyDatabase() != FINGERPRINT_OK) {
+        tgSend(teacherID, "⚠️ The fingerprint sensor is not answering, so nothing was deleted. Check its wires and try again.", "");
+      } else {
+        for (int i = 0; i < MAX_STUDENTS; i++) resetDayFields(i);
+        sCount = 0;
+        saveStudents();
+        saveAttendance();
+        prefs.begin("sf2", false); prefs.clear(); prefs.end();   // this month's and last month's SF2 records
+        memset(&curMonth, 0, sizeof(curMonth));
+        ensureMonth();
+        String left = finger.getTemplateCount() == FINGERPRINT_OK ? String(finger.templateCount) : String("?");
+        tgSend(teacherID, "🧹 System cleared: 0 students, " + left + " fingerprints.\n"
+                          "Add students with /addstudent. The first one is #1 = fingerprint ID 1.", "");
+      }
     }
     else if (txt == "/systemcheck") {
       updateTime();
@@ -1775,18 +1780,85 @@ void clearSensorReplies() {
   while (fingerSerial.available()) fingerSerial.read();
 }
 
+// Waits until the button is let go, so one long press does not also choose the next screen.
+void waitRelease(int pin) {
+  while (digitalRead(pin) == LOW) delay(10);
+  delay(50);   // let the contact settle
+}
+
+// Name of the student with this fingerprint ID, cut to fit one screen line.
+String studentForID(int id) {
+  return id >= 1 && id <= sCount ? st[id - 1].name.substring(0, 21) : String("(no student)");
+}
+
+// Waits for a finger on the sensor (onSensor = true) or for it to be lifted (false), with the
+// same rest between checks as normal scanning. BACK cancels. The web pages keep working.
+WaitResult waitForFinger(bool onSensor, unsigned long timeoutMs) {
+  unsigned long start = millis();
+  int noReply = 0;
+  while (millis() - start < timeoutMs) {
+    if (digitalRead(BTN_BACK) == LOW) return WAIT_CANCELLED;
+    server.handleClient();
+    clearSensorReplies();
+    uint8_t p = finger.getImage();
+    if (p == FINGERPRINT_PACKETRECIEVEERR || p == FINGERPRINT_TIMEOUT || p == FINGERPRINT_BADPACKET) {
+      if (++noReply >= 5) return WAIT_NO_SENSOR;
+    } else {
+      noReply = 0;
+      if (onSensor ? p == FINGERPRINT_OK : p == FINGERPRINT_NOFINGER) return WAIT_OK;
+    }
+    delay(FINGER_POLL_MS);
+  }
+  return WAIT_TIMEOUT;
+}
+
+// Shows how the enrollment ended, then goes back to scanning.
+void enrollEnd(const String& head, const String& l1, const String& l2 = "", const String& l3 = "") {
+  show(head, l1, l2, l3);
+  holdScreen(3000);
+  waitFingerLift = true;   // a finger still on the sensor is not taken as an attendance scan
+  currentMode = IDLE;
+}
+
+// One step of the enrollment: waits for the finger (or for it to be lifted) and explains
+// on the screen why the enrollment stopped if that didn't happen. True if it happened.
+bool enrollStep(bool onSensor, unsigned long timeoutMs) {
+  WaitResult r = waitForFinger(onSensor, timeoutMs);
+  if (r == WAIT_CANCELLED) enrollEnd("ENROLL", "Cancelled.", "Nothing was saved.");
+  else if (r == WAIT_TIMEOUT) enrollEnd("ENROLL", "Took too long.", "Nothing was saved.", "Start again.");
+  else if (r == WAIT_NO_SENSOR) enrollEnd("SENSOR ERROR", "No reply from the", "fingerprint sensor.", "Nothing was saved.");
+  return r == WAIT_OK;
+}
+
 void enrollFinger() {
+  String head = "ENROLL ID " + String(targetID);
   clearSensorReplies();
-  int p = -1; show("ENROLL", "Place finger...");
-  while (p != FINGERPRINT_OK) { p = finger.getImage(); if (digitalRead(BTN_BACK) == LOW) return; }
-  finger.image2Tz(1); show("ENROLL", "Remove finger"); delay(2000); p = 0;
-  while (p != FINGERPRINT_NOFINGER) p = finger.getImage();
-  show("ENROLL", "Place again..."); p = -1;
-  while (p != FINGERPRINT_OK) p = finger.getImage();
-  finger.image2Tz(2);
-  if (finger.createModel() == FINGERPRINT_OK) { finger.storeModel(targetID); show("SUCCESS", "ID: " + String(targetID)); }
-  else show("FAILED", "Error");
-  delay(2000); currentMode = IDLE;
+  bool replacing = finger.loadModel(targetID) == FINGERPRINT_OK;   // this ID already has a fingerprint
+
+  show(head, studentForID(targetID), "Place finger...", replacing ? "(replaces old one)" : "");
+  if (!enrollStep(true, 20000)) return;
+  if (finger.image2Tz(1) != FINGERPRINT_OK) { enrollEnd("FAILED", "Finger not clear.", "Nothing was saved.", "Start again."); return; }
+
+  // The same finger must not be saved under two IDs, or a scan could mark the wrong student
+  uint8_t s = finger.fingerSearch();
+  if (s == FINGERPRINT_PACKETRECIEVEERR) { enrollEnd("SENSOR ERROR", "No reply from the", "fingerprint sensor.", "Nothing was saved."); return; }
+  if (s == FINGERPRINT_SAME_IMAGE) { enrollEnd("TRY AGAIN", "Lift your finger,", "wait a second, then", "start again."); return; }
+  if (s == FINGERPRINT_OK && finger.fingerID != targetID) {
+    if (finger.fingerID >= 1 && finger.fingerID <= sCount) {
+      enrollEnd("ALREADY ENROLLED", "as ID " + String(finger.fingerID) + ":", studentForID(finger.fingerID), "Nothing was saved.");
+      return;
+    }
+    finger.deleteModel(finger.fingerID);   // a leftover of this finger under an ID no student uses
+  }
+
+  show(head, studentForID(targetID), "Remove finger.");
+  if (!enrollStep(false, 15000)) return;
+  show(head, studentForID(targetID), "Place the same", "finger again...");
+  if (!enrollStep(true, 20000)) return;
+  if (finger.image2Tz(2) != FINGERPRINT_OK) { enrollEnd("FAILED", "Finger not clear.", "Nothing was saved.", "Start again."); return; }
+  if (finger.createModel() != FINGERPRINT_OK) { enrollEnd("FAILED", "The two scans don't", "match. Nothing saved.", "Start again."); return; }
+  if (finger.storeModel(targetID) != FINGERPRINT_OK) { enrollEnd("FAILED", "Could not save the", "fingerprint.", "Start again."); return; }
+  enrollEnd("SUCCESS", "Saved as ID " + String(targetID), studentForID(targetID), "Scan once to check.");
 }
 
 void deleteFinger() {
@@ -1795,6 +1867,24 @@ void deleteFinger() {
   if (finger.deleteModel(targetID) == FINGERPRINT_OK) show("DELETED", "ID: " + String(targetID));
   else show("ERROR", "Failed");
   delay(2000); currentMode = IDLE;
+}
+
+// Called before student j is taken off the class list. Deletes their fingerprint and moves
+// the fingerprints of the students below up one ID, the same way the class list moves up,
+// so every fingerprint still marks the right student. Returns the fingerprint IDs that
+// could not be moved or deleted (empty when everything worked).
+String removeFingerprint(int j) {
+  show("REMOVING", "Moving fingerprints...", "Please wait.");
+  clearSensorReplies();
+  String failed = "";
+  for (int id = j + 1; id < sCount; id++) {
+    uint8_t p = finger.loadModel(id + 1);   // fingerprint of the student who becomes #id
+    if (p == FINGERPRINT_OK) p = finger.storeModel(id);
+    else if (p != FINGERPRINT_PACKETRECIEVEERR) p = finger.deleteModel(id);   // that student has no fingerprint yet
+    if (p != FINGERPRINT_OK) failed += " " + String(id);
+  }
+  if (finger.deleteModel(sCount) != FINGERPRINT_OK) failed += " " + String(sCount);   // the last ID is not used anymore
+  return failed;
 }
 
 // -------------------- WIFI LOGIC --------------------
@@ -2007,7 +2097,7 @@ void loop() {
       } else {
         // Only if you sent /unlockmenu will this work
         currentMode = MENU;
-        delay(200);
+        waitRelease(BTN_ENR);
       }
     }
   }
@@ -2021,17 +2111,25 @@ void loop() {
     show("MENU", opts);
 
     if (digitalRead(BTN_ENR) == LOW) {
-      delay(200);
+      waitRelease(BTN_ENR);
       if (menuIdx == 0) currentMode = ENROLLING;
       else if (menuIdx == 1) currentMode = DELETING;
       else if (menuIdx == 2) reconnectWiFi();
       else currentMode = IDLE;
     }
   }
+  else if (currentMode == ENROLLING && sCount == 0) {
+    show("ENROLL", "No students yet.", "Add them first with", "/addstudent");
+    holdScreen(3000);
+    currentMode = IDLE;
+  }
   else if (currentMode == ENROLLING || currentMode == DELETING) {
-    show(currentMode == ENROLLING ? "ENROLL" : "DELETE", "ID: " + String(targetID), "UP/DN adjust", "ENR confirm");
-    if (digitalRead(BTN_UP) == LOW) { targetID++; delay(200); }
+    // Enrolling only goes up to the last student (fingerprint ID = student number on /list).
+    // Deleting can go higher, to clear old fingerprints of removed students.
+    if (currentMode == ENROLLING && targetID > sCount) targetID = sCount;
+    show(currentMode == ENROLLING ? "ENROLL" : "DELETE", "ID: " + String(targetID), studentForID(targetID), "UP/DN adjust ENR ok");
+    if (digitalRead(BTN_UP) == LOW && (currentMode == DELETING || targetID < sCount)) { targetID++; delay(200); }
     if (digitalRead(BTN_DN) == LOW && targetID > 1) { targetID--; delay(200); }
-    if (digitalRead(BTN_ENR) == LOW) { delay(200); if (currentMode == ENROLLING) enrollFinger(); else deleteFinger(); }
+    if (digitalRead(BTN_ENR) == LOW) { waitRelease(BTN_ENR); if (currentMode == ENROLLING) enrollFinger(); else deleteFinger(); }
   }
 }
