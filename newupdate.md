@@ -3,7 +3,7 @@
 Goal: fewer, more useful Telegram alerts, a guidance counselor account, a 3-day absence alert, and SF2 dates that show up without waiting for a scan.
 Rule: small changes, reuse what is already there. The only new saved setting is the guidance ID.
 
-Status: **all 5 items are coded, compiled and uploaded** to the device (COM11, 11/16/2026 10:31 AM; the guidance ID moved to the web page in a second upload at 10:55 AM and became required in a third upload at 11:28 AM; 1,356,102 bytes, 43% of flash; was 1,353,478). The user manual is updated. Most device tests at the bottom are still to do.
+Status: **all 5 items are coded, compiled and uploaded** to the device (COM11, 11/16/2026 10:31 AM; the guidance ID moved to the web page in a second upload at 10:55 AM and became required in a third upload at 11:28 AM; the 3-day alert became ">= 3, every day" in a fourth upload at 11:44 AM; 1,356,274 bytes, 43% of flash; was 1,353,478). The user manual is updated. Most device tests at the bottom are still to do.
 
 ## Who gets which alert (after the update)
 
@@ -11,7 +11,7 @@ Status: **all 5 items are coded, compiled and uploaded** to the device (COM11, 1
 |---|---|---|---|
 | Late (AM or PM) | yes | yes | no |
 | Absent (AM or PM, at the sweep) | yes | yes | no |
-| Absent 3 school days in a row | yes | yes | yes |
+| Absent 3 or more school days in a row (every day) | yes | yes | yes |
 | Arrived on time | no | ~~yes~~ removed | no |
 | Timed out | no | ~~yes~~ removed | no |
 | No time-out | ~~yes~~ removed | ~~yes~~ removed | no |
@@ -38,13 +38,14 @@ Status: **all 5 items are coded, compiled and uploaded** to the device (COM11, 1
 - [x] `runSweep()`: keep the absent alert and remove the no-time-out alert. The "No Time Out" status is still recorded.
 
 ## 3. Alert for 3 absences in a row
-- "Absent for a day" means an `x` on the SF2: no time-in in the AM or PM session.
+- "Absent for a day" means an `x` on the SF2: no AM time-in and no PM time-in that day.
 - Only class days count. Weekends and holidays don't break the streak or add to it.
 - [x] New small function `absentRun()`: count back over the class days in this month's SF2 record. It uses last month's record when the count crosses into the previous month, and loads it only once.
   - Last month's record is used only if it really is the month right before.
 - [x] Run it once a day at the end of the PM sweep (`checkAbsentStreaks()`), when the day's marks are final, and only on days with classes.
-- [x] Alert when the streak reaches exactly 3 (`sendStreakAlert()`): one message to the teacher, the parent and guidance. A 4th or 5th day in a row does not send it again. A new streak later can alert again.
-- Message: "<Name> (LRN ...) has been absent for 3 school days in a row (as of <date>)." Guidance also gets the grade and section when they are set.
+- [x] Alert when the streak is **3 or more** (`run >= 3`, `sendStreakAlert()`): to the teacher, the parent and guidance, **every school day** until the student comes back (day 3, 4, 5 ...).
+  - Changed on 11/16/2026 (fourth upload, 11:44 AM): the first version used `== 3` (alert once, on day 3 only). Now it's `>= 3`, and `absentRun()` counts the whole streak instead of stopping at 4.
+- Message, with the real number of days: "<Name> (LRN ...) has been absent for N school days in a row (as of <date>)." Guidance also gets the grade and section when they are set.
 - No new storage: it reads the SF2 records the device already keeps.
 
 ## 4. SF2 dates without waiting for a scan
@@ -83,8 +84,8 @@ The fix: when the new day starts, finish the old day first, then start the new o
 ## Test results (on this PC)
 - [x] **Compile:** the full firmware builds for the ESP32 Dev Module, Huge APP (arduino-cli).
 - [x] **Item 2 (alerts):** every automatic message that can reach a parent was listed from the code. Only four are left, all late or absent, for AM and PM. The other parent messages are sent only on request (`/broadcast`, `/sendstatus`, `/myid`, `/status`).
-- [x] **Items 3, 4, 5 (logic):** 12 checks pass in `logic_test.py`, a Python copy of the new logic:
-  - streak of exactly 3, a 4th day doesn't repeat, weekends and holidays skipped, crossing into last month;
+- [x] **Items 3, 4, 5 (logic):** 13 checks pass in `logic_test.py`, a Python copy of the new logic:
+  - no alert at 2 days, alert at 3, again at 4 with the count "4", stops when the student comes back, a 7-day streak counted across two months, weekends and holidays skipped;
   - SF2 columns before any scan, Saturdays, the 25-column limit, totals only on class days, 5-in-a-row skips holidays;
   - finishing a missed PM sweep quietly.
 - Windows Smart App Control blocks running a C++ compiler on this PC, so the firmware code itself can only be tested on the device.
@@ -105,7 +106,9 @@ The fix: when the new day starts, finish the old day first, then start the new o
    - Before the update, November had 4 day columns (10, 11, 12, 16). After the update, all 21 weekdays (Nov 2-30) have their date and the right day letter.
    - Totals appear only on the 4 class days. "No. of days of classes" (4) and the average attendance are the same as before.
    - Every student's marks are under the right dates, and today's attendance was kept through the upload (19 students).
-5. [ ] 3-day alert: shows up on the 3rd school day in a row that a student is absent, at the PM sweep.
+5. 3-day alert:
+   - [x] The new firmware is running on the device (the Telegram Bot page says "3 or more school days in a row"). Today's attendance was kept.
+   - [ ] To do: on the 3rd school day in a row that a student is absent, the alert comes at the PM sweep. If the student is still absent the next day, it comes again saying "4 school days".
 6. [ ] Missed day: let a few students scan in the PM, then turn the device off before the PM sweep. Turn it on the next morning.
    - The teacher gets the "device was off" message.
    - Yesterday's SF2 shows the PM absentees (x or half day).

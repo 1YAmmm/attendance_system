@@ -317,9 +317,9 @@ def content():
         ["Automatic absent marking", "At a set time after each session (the \"sweep\"), students who never scanned are marked **Absent**. "
                                      "If the device was off at that time, the check is done when it is turned on again."],
         ["Telegram alerts to parents", "Parents get a message only when their child is **late** or **absent** (AM or PM), and when the "
-                                       "child has been **absent 3 school days in a row**."],
+                                       "child has been **absent 3 or more school days in a row**."],
         ["Telegram reports to the teacher", "The teacher receives late, absent and 3-day absence reports and controls the system with simple commands."],
-        ["Guidance counselor alerts", "The school's guidance counselor receives an alert when a student is absent 3 school days in a row."],
+        ["Guidance counselor alerts", "The school's guidance counselor receives an alert when a student is absent 3 or more school days in a row."],
         ["Live web dashboard", "See today's attendance of the whole class on a phone or laptop. It updates every 5 seconds."],
         ["SF2 Excel report", "Download a ready-to-print DepEd SF2 (Daily Attendance Report of Learners) for this month or last month. "
                              "The dates of the month are filled in from the 1st."],
@@ -368,7 +368,7 @@ def content():
         ["Late time", "If a student times in at or after this time, they are marked **Late In**."],
         ["Dismissal time", "Students can only time out at or after this time. Earlier scans show **EARLY**."],
         ["Sweep time", "The time the system checks who never came (marked **Absent**) and who never timed out (**No Time Out**)."],
-        ["3-day absence", "A student who was absent the whole day (no AM and no PM time in) on 3 school days in a row."],
+        ["3-day absence", "A student who was absent the whole day (no AM and no PM time in) on 3 or more school days in a row."],
         ["Fingerprint ID", "The number a fingerprint is saved under. It must match the student's number in the class list (student #1 = ID 1)."],
         ["LRN", "Learner Reference Number (12 digits). Used to identify a student in Telegram commands."],
         ["Telegram ID", "A number that identifies a Telegram account, e.g. 5217445288. The system uses it to send messages."],
@@ -762,7 +762,8 @@ def content():
         ["Student times out", "Recorded as **Timed Out**. No Telegram message is sent."],
         ["At the AM / PM sweep time", "Students with no time in for that session are marked **Absent** (parent + teacher alerted). "
                                       "Students who timed in but not out are marked **No Time Out** (recorded only, no message)."],
-        ["After the PM sweep", "Students absent the whole day for the **3rd school day in a row** get one alert to the teacher, "
+        ["After the PM sweep", "Students absent the whole day for **3 or more school days in a row** get an alert, every school "
+                               "day until they come back, to the teacher, "
                                "the parent and the guidance account (6.6)."],
         ["After every scan and sweep", "Today's attendance and this month's SF2 marks are saved to memory."],
         ["A new day starts", "If the device was **off at a sweep time** the day before, that sweep is done first: the absences are "
@@ -807,7 +808,7 @@ def content():
         ["Student times **out**"] + yn(0, 0, 0),
         ["**Absent** at the AM or PM sweep"] + yn(1, 1, 0),
         ["**No time out** at the sweep"] + yn(0, 0, 0),
-        ["**Absent 3 school days in a row**"] + yn(1, 1, 1),
+        ["**Absent 3 or more school days in a row** (every day)"] + yn(1, 1, 1),
         ["Device was off at a sweep time (missed day finished the next day)"] + yn(1, 0, 0),
         ["System online, new website address, security alert"] + yn(1, 0, 0),
         ["School announcement (`/broadcast`) and status reports (`/sendstatus`, `/status`)"] + yn(0, 1, 0),
@@ -841,8 +842,9 @@ def content():
                          "123456789012), arrived LATE for the morning (AM) session at 7:35 AM. Kindly remind them to come to "
                          "school on time. Thank you.~~"],
         ["Absent (AM or PM)", "~~...your child, JUAN SANTOS (LRN: ...), was marked ABSENT for the afternoon (PM) session today.~~"],
-        ["Absent 3 school days in a row", "~~...your child, JUAN SANTOS (LRN: ...), has been absent for 3 school days in a row "
-                                          "(as of 11/16/2026). Please contact the class adviser. Thank you.~~"],
+        ["Absent 3 or more school days in a row", "~~...your child, JUAN SANTOS (LRN: ...), has been absent for 3 school days in a "
+                                                  "row (as of 11/16/2026). Please contact the class adviser. Thank you.~~ If the "
+                                                  "child is still absent, it is sent again each school day with 4, 5 ... days."],
         ["School announcement", "~~SCHOOL ANNOUNCEMENT: (message from the teacher)~~"],
         ["Status report", "The child's AM In, AM Out, PM In and PM Out status and times for today (when the teacher sends "
                           "`/sendstatus`, or the parent sends `/status`)."],
@@ -858,7 +860,7 @@ def content():
     s += note("Each student has one parent Telegram ID. If two guardians want alerts, decide which account to register.")
 
     s += [h2("6.5 The guidance counselor account")]
-    s += [p("The guidance counselor (or another school official) can receive an alert whenever a student is **absent 3 school "
+    s += [p("The guidance counselor (or another school official) can receive an alert whenever a student is **absent 3 or more school "
             "days in a row**, so they can follow up early. The guidance account is **required**: the Telegram Bot settings page "
             "can only be saved with both the teacher's and the guidance counselor's Telegram IDs. It receives no other messages.")]
     s += steps([
@@ -867,7 +869,7 @@ def content():
         "The teacher opens the web page, taps **Settings > Telegram Bot**, types the number in **Guidance Telegram ID** (below "
         "the Teacher Telegram ID), types the Admin PIN and taps **Save and Restart**.",
         "Before the device restarts, the guidance account receives a test message: **This account will now get an alert when a "
-        "student is absent 3 school days in a row.** The device is back after about 20 seconds.",
+        "student is absent 3 or more school days in a row.** The device is back after about 20 seconds.",
     ])
     s += table([
         ["To do this", "On Settings > Telegram Bot"],
@@ -875,7 +877,7 @@ def content():
         ["See which account is set", "Open the page: the box shows the saved ID. While none is saved, the dashboard shows a "
                                      "reminder: **The guidance Telegram ID is not set yet.**"],
     ], [0.3, 0.7])
-    s += code("3-DAY ABSENCE", "Student: JUAN SANTOS", "LRN: 123456789012", "Class: Grade 7 · Rizal",
+    s += code("ABSENT 3 DAYS IN A ROW", "Student: JUAN SANTOS", "LRN: 123456789012", "Class: Grade 7 · Rizal",
               "Absent 3 school days in a row (as of 11/16/2026).", intro="This is what the guidance counselor receives:")
     s += important("If the test message does not arrive, the guidance counselor has not tapped **Start** in the bot yet, or the ID "
                    "is wrong. Check the number with `/myid` and save it again on the Telegram Bot settings page. The ID must be "
@@ -883,12 +885,13 @@ def content():
                    "nothing is changed.")
     s += [h2("6.6 How the 3-day absence alert works")]
     s += bullets([
-        "A school day counts as **absent** when the student did not time in for the AM **or** the PM session (an X on the SF2). "
-        "Coming for only half the day does not count.",
+        "A school day counts as **absent** when the student did not time in at all that day: no AM time in **and** no PM time "
+        "in (an X on the SF2). Coming for only half the day does not count.",
         "Only **days with classes** count. Weekends, holidays and days when nobody scanned do not break the count and do not add "
         "to it. The count also continues from last month.",
-        "The check runs once a day, right after the **PM sweep**. The alert is sent on the **3rd** absent day in a row, once. A 4th "
-        "or 5th day in a row does not send it again; after the student comes back, a new streak can alert again.",
+        "The check runs once a day, right after the **PM sweep**. The alert is sent on the **3rd** absent day in a row and again "
+        "**every school day after that** while the student is still absent, with the number of days (3, 4, 5 ...). It stops when "
+        "the student comes back; the count then starts again from 0.",
         "It goes to the teacher, the parent (if a parent ID is saved) and the guidance account. If the guidance ID is the "
         "same as the teacher's ID, the teacher gets it only once.",
         "If the device was off at the PM sweep, the check is done the next time a new day starts (5.3), with the date of the missed day.",
@@ -1041,7 +1044,8 @@ def content():
         ["**The website has a new address.** + Website: http://...", "The router gave the device a new IP address."],
         ["**ATTENDANCE REPORT - LATE IN (AM) at 7:35 AM**", "A student timed in late (AM or PM)."],
         ["**ATTENDANCE REPORT - ABSENT (AM)**", "At the sweep, for each absent student (AM or PM)."],
-        ["**3 DAYS ABSENT** + student and LRN", "After the PM sweep, for a student absent 3 school days in a row (6.6)."],
+        ["**ABSENT 3 DAYS IN A ROW** (or 4, 5 ...) + student and LRN", "After the PM sweep, for each student absent 3 or more "
+         "school days in a row, every day until they come back (6.6)."],
         ["**The device was off at the sweep time on (date). Absences for that day were recorded, but parents were not alerted.**",
          "A new day started and the device found that the day before had a missed sweep (5.3)."],
         ["**SECURITY ALERT** at (time)", "3 unknown fingerprints were scanned in a row."],
@@ -1085,7 +1089,7 @@ def content():
         ["Telegram Bot page says ~~Both Telegram IDs must be filled in~~, or the dashboard says ~~The guidance Telegram ID is "
          "not set yet~~", "Both IDs are required and take numbers only. Ask the guidance counselor for their Telegram ID "
          "(they open the bot, tap **Start** and send `/myid`), type it in **Guidance Telegram ID** and save (6.5)."],
-        ["Guidance counselor gets no alerts", "1) The guidance account only gets a message when a student is absent 3 school "
+        ["Guidance counselor gets no alerts", "1) The guidance account only gets a message when a student is absent 3 or more school "
          "days in a row. 2) Open **Settings > Telegram Bot** and check the **Guidance Telegram ID** (it must be the number from "
          "`/myid`). 3) The guidance counselor must have tapped **Start** in the bot; save the ID again and check that the test "
          "message arrives."],
@@ -1181,7 +1185,7 @@ def content():
         ["Time format for commands", "H:MM AM/PM, e.g. 7:30 AM, 4:30 PM"],
         ["Default times", "Late 7:20 AM / 12:30 PM, time out from 11:40 AM / 4:30 PM, absence check 12:00 PM / 5:00 PM"],
         ["Session change", "12:00 noon (before = AM, from 12:00 = PM)"],
-        ["Who gets alerts", "Teacher and parents: late, absent, 3 days absent. Guidance: 3 days absent only."],
+        ["Who gets alerts", "Teacher and parents: late, absent, 3+ days absent. Guidance: 3+ days absent only."],
         ["Guidance account (required)", "Web page: Settings > Telegram Bot > Guidance Telegram ID"],
         ["Clock / time zone", "Philippine time (from the internet)"],
         ["WiFi lost", "Setup hotspot opens after 1 minute; it closes by itself when the WiFi is back"],
@@ -1211,8 +1215,8 @@ def content():
     ]]
     s += [h3("A student's day")]
     s += [p("**AM IN** (arrive) -> **AM OUT** (after AM dismissal) -> **PM IN** (arrive after 12:00 noon) -> **PM OUT** (after PM "
-            "dismissal). No time in by the sweep time = **Absent** (alert); no time out = **No Time Out** (no alert). Absent 3 "
-            "school days in a row = alert to the teacher, the parent and guidance.")]
+            "dismissal). No time in by the sweep time = **Absent** (alert); no time out = **No Time Out** (no alert). Absent 3 or "
+            "more school days in a row = alert to the teacher, the parent and guidance, every day until the student comes back.")]
     return s
 
 

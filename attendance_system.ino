@@ -451,12 +451,12 @@ void saveDayMarks() {
   saveMonth();
 }
 
-// School days in a row (up to 4) that student i was absent the whole day ('x' on the SF2),
-// counting back from day d of this month into last month (prev, may be null). Days without classes are skipped.
+// School days in a row that student i was absent the whole day ('x' on the SF2), counting back
+// from day d of this month into last month (prev, may be null). Days without classes are skipped.
 int absentRun(int i, int d, const MonthRec* prev) {
   const MonthRec* r = &curMonth;
   int run = 0;
-  while (run < 4) {
+  for (;;) {
     if (d < 1) {
       if (r == prev || !prev) break;
       r = prev; d = 31;
@@ -1219,26 +1219,28 @@ bool runSweep(bool morning, bool alerts) {
   return held;
 }
 
-// A student absent 3 school days in a row: tells the teacher, the parent and guidance.
-void sendStreakAlert(const Student& s) {
-  String date = dateText(dayDate);
-  tgSend(teacherID, "🚨 *3 DAYS ABSENT*\nStudent: " + s.name + "\nLRN: " + s.lrn + "\nAbsent 3 school days in a row (as of " + date + ").", "Markdown");
+// A student absent `days` (3 or more) school days in a row: tells the teacher, the parent and guidance.
+void sendStreakAlert(const Student& s, int days) {
+  String date = dateText(dayDate), n = String(days);
+  tgSend(teacherID, "🚨 *ABSENT " + n + " DAYS IN A ROW*\nStudent: " + s.name + "\nLRN: " + s.lrn +
+                    "\nAbsent " + n + " school days in a row (as of " + date + ").", "Markdown");
   sendToParent(s, "Good day, Parent/Guardian.\nThis is to inform you that your child, " + s.name + " (LRN: " + s.lrn +
-                  "), has been absent for 3 school days in a row (as of " + date + ").\nPlease contact the class adviser. Thank you.");
+                  "), has been absent for " + n + " school days in a row (as of " + date + ").\nPlease contact the class adviser. Thank you.");
   if (guidanceID == "" || guidanceID == teacherID) return;
-  String g = "📋 3-DAY ABSENCE\nStudent: " + s.name + "\nLRN: " + s.lrn;
+  String g = "📋 ABSENT " + n + " DAYS IN A ROW\nStudent: " + s.name + "\nLRN: " + s.lrn;
   if (gradeLevel != "" || sectionName != "") g += "\nClass: " + classLabel();
-  tgSend(guidanceID, g + "\nAbsent 3 school days in a row (as of " + date + ").", "");
+  tgSend(guidanceID, g + "\nAbsent " + n + " school days in a row (as of " + date + ").", "");
 }
 
-// End of a school day (the day dayDate): alerts once for each student whose absence that day is
-// their 3rd school day in a row. A 4th day in a row doesn't alert again.
+// End of a school day (the day dayDate): alerts for each student who has now been absent 3 or more
+// school days in a row. It repeats every school day until the student comes back.
 void checkAbsentStreaks() {
   int y = dayDate / 10000, m = dayDate / 100 % 100, d = dayDate % 100;
   if (d < 1 || d > 31 || curMonth.year != y || curMonth.month != m || !((curMonth.classDays >> (d - 1)) & 1)) return;
   bool hasPrev = loadPrevMonth(otherMonth) && otherMonth.year * 12 + otherMonth.month == y * 12 + m - 1;
   for (int i = 0; i < sCount; i++) {
-    if (absentRun(i, d, hasPrev ? &otherMonth : nullptr) == 3) sendStreakAlert(st[i]);
+    int run = absentRun(i, d, hasPrev ? &otherMonth : nullptr);
+    if (run >= 3) sendStreakAlert(st[i], run);
   }
 }
 
@@ -1647,7 +1649,7 @@ String telegramBotPage(const String& msg) {
   html += pinField();
   html += "<button class='btn block' type='submit'>Save and Restart</button></form>";
   html += "<p class='hint'>To get a Telegram ID, open the bot in Telegram, tap Start and send /myid. "
-          "The guidance account only gets an alert when a student is absent 3 school days in a row.</p>";
+          "The guidance account only gets an alert when a student is absent 3 or more school days in a row.</p>";
   html += backToSettings();
   return html;
 }
@@ -1782,7 +1784,7 @@ void setupWeb() {
     server.send(200, "text/html", restartPage("The system is restarting with the new bot settings. This page will go back to the dashboard in 20 seconds."));
     show("SETTINGS", "Bot saved.", "Restarting...");
     if (guidanceChanged) {   // proves the new guidance ID works; sent before the restart
-      tgSend(guidanceID, "✅ This account will now get an alert when a student is absent 3 school days in a row.", "");
+      tgSend(guidanceID, "✅ This account will now get an alert when a student is absent 3 or more school days in a row.", "");
       tgFlush(8000);
     }
     delay(1500);
