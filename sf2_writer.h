@@ -34,6 +34,7 @@ struct SF2Model {
   int nDays;                     // number of class days (max 25)
   uint8_t dayNum[SF2_MAX_DAYS];  // day of the month for each column
   uint8_t dayOfWeek[SF2_MAX_DAYS]; // 0 = Sunday ... 6 = Saturday
+  uint32_t held;                 // bit k: classes were held on day column k (not: future day or holiday)
   int nMale, nFemale;
   SF2Learner male[SF2_ROWS];
   SF2Learner female[SF2_ROWS];
@@ -76,6 +77,7 @@ struct SF2Stats {
   int absM, absF, tardyM, tardyF;
   long attendM, attendF;              // total daily attendance for the month
   int consecM, consecF;               // learners with 5+ consecutive absences
+  int heldDays;                       // day columns that had classes
 };
 
 struct SF2Prepared {
@@ -89,9 +91,12 @@ static int sf2_count(const SF2Learner& l, int nDays, uint8_t code) {
   return n;
 }
 
-static bool sf2_five_in_a_row(const SF2Learner& l, int nDays) {
+static bool sf2_held(const SF2Model& m, int k) { return (m.held >> k) & 1; }
+
+static bool sf2_five_in_a_row(const SF2Learner& l, const SF2Model& m) {
   int run = 0;
-  for (int k = 0; k < nDays; k++) {
+  for (int k = 0; k < m.nDays; k++) {
+    if (!sf2_held(m, k)) continue;   // no classes that day
     run = (l.codes[k] == SF2_ABSENT) ? run + 1 : 0;
     if (run >= 5) return true;
   }
@@ -104,6 +109,8 @@ static void sf2_stats(const SF2Model& m, SF2Stats& s) {
                    ? SF2_DEFAULT_MALE_ROWS : m.nMale;
   if (s.maleRows > SF2_ROWS) s.maleRows = SF2_ROWS;
   for (int k = 0; k < m.nDays; k++) {
+    if (!sf2_held(m, k)) continue;   // future day or holiday: not counted
+    s.heldDays++;
     for (int i = 0; i < m.nMale; i++) if (m.male[i].codes[k] != SF2_ABSENT) s.presM[k]++;
     for (int i = 0; i < m.nFemale; i++) if (m.female[i].codes[k] != SF2_ABSENT) s.presF[k]++;
     s.attendM += s.presM[k];
@@ -112,12 +119,12 @@ static void sf2_stats(const SF2Model& m, SF2Stats& s) {
   for (int i = 0; i < m.nMale; i++) {
     s.absM += sf2_count(m.male[i], m.nDays, SF2_ABSENT);
     s.tardyM += sf2_count(m.male[i], m.nDays, SF2_LATE) + sf2_count(m.male[i], m.nDays, SF2_CUT);
-    if (sf2_five_in_a_row(m.male[i], m.nDays)) s.consecM++;
+    if (sf2_five_in_a_row(m.male[i], m)) s.consecM++;
   }
   for (int i = 0; i < m.nFemale; i++) {
     s.absF += sf2_count(m.female[i], m.nDays, SF2_ABSENT);
     s.tardyF += sf2_count(m.female[i], m.nDays, SF2_LATE) + sf2_count(m.female[i], m.nDays, SF2_CUT);
-    if (sf2_five_in_a_row(m.female[i], m.nDays)) s.consecF++;
+    if (sf2_five_in_a_row(m.female[i], m)) s.consecF++;
   }
 }
 
@@ -226,7 +233,7 @@ static void sf2_fill_cell(SF2Sink& o, int row, int col, int style, const SF2Mode
     case 62: {
       bool both = (row == 62);
       if (dayCol) {
-        if (hasDay) sf2_numcell(o, row, col, style, s.presF[k] + (both ? s.presM[k] : 0));
+        if (hasDay && sf2_held(m, k)) sf2_numcell(o, row, col, style, s.presF[k] + (both ? s.presM[k] : 0));
         else sf2_empty(o, row, col, style);
       } else if (col == 29) {
         sf2_numcell(o, row, col, style, s.absF + (both ? s.absM : 0));
@@ -237,7 +244,7 @@ static void sf2_fill_cell(SF2Sink& o, int row, int col, int style, const SF2Mode
     }
     case 64:
       if (col == 29) sf2_textcell(o, row, col, style, m.monthName);
-      else sf2_numcell(o, row, col, style, m.nDays);
+      else sf2_numcell(o, row, col, style, s.heldDays);   // no. of days of classes
       return;
     case 70: {
       long v = (col == 34) ? m.nMale : (col == 35) ? m.nFemale : m.nMale + m.nFemale;
@@ -246,10 +253,10 @@ static void sf2_fill_cell(SF2Sink& o, int row, int col, int style, const SF2Mode
     }
     case 74:
     case 75: {
-      if (m.nDays == 0) { sf2_empty(o, row, col, style); return; }
+      if (s.heldDays == 0) { sf2_empty(o, row, col, style); return; }
       long attend = (col == 34) ? s.attendM : (col == 35) ? s.attendF : s.attendM + s.attendF;
       int reg = (col == 34) ? m.nMale : (col == 35) ? m.nFemale : m.nMale + m.nFemale;
-      double ada = (double)attend / m.nDays;
+      double ada = (double)attend / s.heldDays;
       if (row == 74) sf2_deccell(o, row, col, style, ada);
       else if (reg > 0) sf2_deccell(o, row, col, style, ada * 100.0 / reg);
       else sf2_empty(o, row, col, style);
@@ -301,7 +308,7 @@ static void sf2_male_total_row(SF2Sink& o, int row, const SF2Model& m, const SF2
       o.str(" t=\"s\"><v>");
       o.num(SF2_MALE_TOTAL_SST);
       o.str("</v></c>");
-    } else if (col >= 4 && col <= 28 && k < m.nDays) sf2_numcell(o, row, col, st, s.presM[k]);
+    } else if (col >= 4 && col <= 28 && k < m.nDays && sf2_held(m, k)) sf2_numcell(o, row, col, st, s.presM[k]);
     else if (col == 29) sf2_numcell(o, row, col, st, s.absM);
     else if (col == 30) sf2_numcell(o, row, col, st, s.tardyM);
     else sf2_empty(o, row, col, st);

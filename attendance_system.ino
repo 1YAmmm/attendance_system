@@ -63,6 +63,7 @@ Preferences prefs;
 // Current bot settings
 String botToken = DEFAULT_BOT_TOKEN;
 String teacherID = DEFAULT_TEACHER_ID;
+String guidanceID = "";   // guidance counselor (set on the Telegram Bot settings page): gets only the 3-day absence alert
 
 // Current WiFi settings (loaded from memory at startup)
 String wifiSsid = "";
@@ -170,6 +171,7 @@ void saveWifiSettings() {
 void loadBotSettings() {
   prefs.begin("bot-cfg", true);
   teacherID = prefs.getString("teacher", DEFAULT_TEACHER_ID);
+  guidanceID = prefs.getString("guidance", "");
   prefs.end();
   botToken = DEFAULT_BOT_TOKEN;   // the token always comes from the code
 }
@@ -178,6 +180,7 @@ void saveBotSettings() {
   prefs.begin("bot-cfg", false);
   prefs.remove("token");          // clear any token saved by an older version
   prefs.putString("teacher", teacherID);
+  prefs.putString("guidance", guidanceID);
   prefs.end();
 }
 
@@ -434,16 +437,37 @@ bool classesHeldToday() {
   return false;
 }
 
-void updateMonthToday() {
-  if (!timeValid || dy < 1 || dy > 31) return;
-  ensureMonth();
-  if (!classesHeldToday()) return;    // nobody scanned today: weekend, holiday or no classes
-  curMonth.classDays |= 1UL << (dy - 1);
+// Turns the AM/PM results in memory (the day dayDate) into that day's SF2 marks.
+void saveDayMarks() {
+  int y = dayDate / 10000, m = dayDate / 100 % 100, d = dayDate % 100;
+  if (d < 1 || d > 31 || !classesHeldToday()) return;   // nobody scanned: weekend, holiday or no classes
+  if (curMonth.year != y || curMonth.month != m) ensureMonth();   // the month changed
+  if (curMonth.year != y || curMonth.month != m) return;
+  curMonth.classDays |= 1UL << (d - 1);
   for (int i = 0; i < sCount; i++) {
-    curMonth.code[i][dy - 1] = dayCodeFor(st[i]);
+    curMonth.code[i][d - 1] = dayCodeFor(st[i]);
     setEnrolled(curMonth, i, true);
   }
   saveMonth();
+}
+
+// School days in a row (up to 4) that student i was absent the whole day ('x' on the SF2),
+// counting back from day d of this month into last month (prev, may be null). Days without classes are skipped.
+int absentRun(int i, int d, const MonthRec* prev) {
+  const MonthRec* r = &curMonth;
+  int run = 0;
+  while (run < 4) {
+    if (d < 1) {
+      if (r == prev || !prev) break;
+      r = prev; d = 31;
+    }
+    if ((r->classDays >> (d - 1)) & 1) {
+      if (r->code[i][d - 1] != SF2_ABSENT || !isEnrolled(*r, i)) break;
+      run++;
+    }
+    d--;
+  }
+  return run;
 }
 
 void shiftMonthRows(MonthRec& m, int j) {
@@ -489,11 +513,13 @@ String timeOf(int h, int m) {
 
 String getTimeStr() { return timeOf(hr, mn); }
 
-String getDateStr() {
-  char buf[12];
-  snprintf(buf, sizeof(buf), "%d/%d/%d", mo, dy, yr);
+String dateText(uint32_t key) {   // YYYYMMDD -> M/D/YYYY
+  char buf[16];
+  snprintf(buf, sizeof(buf), "%d/%d/%d", (int)(key / 100 % 100), (int)(key % 100), (int)(key / 10000));
   return String(buf);
 }
+
+String getDateStr() { return dateText(todayKey()); }
 
 void show(const String& head, const String& l1, const String& l2 = "", const String& l3 = "") {
   display.clearDisplay();
@@ -810,32 +836,29 @@ void telegramTask(void*) {
   }
 }
 
+void sendToParent(const Student& s, const String& msg) {
+  if (s.telID != "0") tgSend(s.telID, msg, "");   // tgSend skips an empty ID
+}
+
+// The only per-session alerts: late (late = true) or absent, to the teacher and the parent.
 // morning: the alert is for the AM session (false: PM session)
-void sendParentAlert(int type, Student &s, bool morning) {
+void sendParentAlert(bool late, Student &s, bool morning) {
   String dateStr = getDateStr();
   String session = morning ? "morning (AM)" : "afternoon (PM)";
   String tag = morning ? " (AM)" : " (PM)";
   String parentMsg = "Good day, Parent/Guardian.\nDate: " + dateStr + "\nThis is to inform you that your child, " + s.name + " (LRN: " + s.lrn + "), ";
   String teacherMsg = "📑 *ATTENDANCE REPORT*\nDate: " + dateStr + "\nStudent: " + s.name + "\nLRN: " + s.lrn + "\nEvent: ";
 
-  if (type == 0) {
+  if (late) {
     String lateTime = (morning ? s.tInM : s.tInA);
     parentMsg += "arrived LATE for the " + session + " session at " + lateTime + ".\nKindly remind them to come to school on time. Thank you.";
     teacherMsg += "🔴 *LATE IN" + tag + "* at " + lateTime;
+  } else {
+    parentMsg += "was marked ABSENT for the " + session + " session today.";
+    teacherMsg += "❌ *ABSENT" + tag + "*";
   }
-  else if (type == 1) { parentMsg += "was marked ABSENT for the " + session + " session today."; teacherMsg += "❌ *ABSENT" + tag + "*"; }
-  else if (type == 2) { parentMsg += "did not time-out for the " + session + " session today."; teacherMsg += "⚠️ *NO TIME-OUT" + tag + "*"; }
-  else if (type == 3) {   // arrived on time: parent only
-    String inTime = (morning ? s.tInM : s.tInA);
-    parentMsg += "has arrived at school and is marked PRESENT for the " + session + " session.\nTime in: " + inTime + "\nThank you.";
-  }
-  else if (type == 4) {   // timed out: parent only
-    String outTime = (morning ? s.tOutM : s.tOutA);
-    parentMsg += "has timed out and left school after the " + session + " session.\nTime out: " + outTime + "\nThank you.";
-  }
-
-  if (type < 3) tgSend(teacherID, teacherMsg, "Markdown");
-  if (s.telID != "0" && s.telID != "") tgSend(s.telID, parentMsg, "");
+  tgSend(teacherID, teacherMsg, "Markdown");
+  sendToParent(s, parentMsg);
 }
 
 String getIndividualStatus(int j) {
@@ -1122,14 +1145,12 @@ void markAttendance(int id) {
   if (hr < 12) { // Morning Logic
     if (!s.inM) {
         s.inM = true; s.tInM = ts;
-        if (hr > lateH || (hr == lateH && mn >= lateM)) { s.sInM = "Late In"; sendParentAlert(0, s, true); }
+        if (hr > lateH || (hr == lateH && mn >= lateM)) { s.sInM = "Late In"; sendParentAlert(true, s, true); }
         else s.sInM = "On Time";
         show("SUCCESS", s.name, "AM IN: " + ts);
-        if (s.sInM == "On Time") sendParentAlert(3, s, true);   // tell the parent the child arrived
     } else if (!s.outM) {
       if (hr > dismissH || (hr == dismissH && mn >= dismissM)) {
         s.outM = true; s.tOutM = ts; s.sOutM = "Timed Out"; show("SUCCESS", s.name, "AM OUT: " + ts);
-        sendParentAlert(4, s, true);   // tell the parent the child left
       } else {
         show("EARLY", "Dismissal at:", timeOf(dismissH, dismissM));
       }
@@ -1140,14 +1161,12 @@ void markAttendance(int id) {
   else { // Afternoon Logic
     if (!s.inA) {
         s.inA = true; s.tInA = ts;
-        if (hr > lateH_PM || (hr == lateH_PM && mn >= lateM_PM)) { s.sInA = "Late In"; sendParentAlert(0, s, false); }
+        if (hr > lateH_PM || (hr == lateH_PM && mn >= lateM_PM)) { s.sInA = "Late In"; sendParentAlert(true, s, false); }
         else s.sInA = "On Time";
         show("SUCCESS", s.name, "PM IN: " + ts);
-        if (s.sInA == "On Time") sendParentAlert(3, s, false);   // tell the parent the child arrived
     } else if (!s.outA) {
       if (hr > dismissH_PM || (hr == dismissH_PM && mn >= dismissM_PM)) {
         s.outA = true; s.tOutA = ts; s.sOutA = "Timed Out"; show("SUCCESS", s.name, "PM OUT: " + ts);
-        sendParentAlert(4, s, false);   // tell the parent the child left
       } else {
         show("EARLY", "Dismissal at:", timeOf(dismissH_PM, dismissM_PM));
       }
@@ -1156,12 +1175,19 @@ void markAttendance(int id) {
     }
   }
   saveAttendance();
-  updateMonthToday();   // keeps this month's SF2 marks up to date
+  saveDayMarks();   // keeps this month's SF2 marks up to date
   holdScreen(2000);
 }
 
-// Starts a fresh attendance day (runs once when the date changes).
+// Starts a fresh attendance day (runs once when the date changes). First finishes the old day:
+// a sweep it missed (the device was off at that time) is done now, without absent alerts.
 void newDay(uint32_t today) {
+  if (dayDate != 0) {
+    bool missed = !mSweepDone && runSweep(true, false);
+    if (!aSweepDone && runSweep(false, false)) missed = true;
+    if (missed) tgSend(teacherID, "⚠️ The device was off at the sweep time on " + dateText(dayDate) +
+                                  ". Absences for that day were recorded, but parents were not alerted.", "");
+  }
   for (int i = 0; i < MAX_STUDENTS; i++) resetDayFields(i);
   mSweepDone = aSweepDone = false;
   dayDate = today;
@@ -1171,23 +1197,49 @@ void newDay(uint32_t today) {
 
 // Marks absences after a session. Skipped when nobody scanned in that session
 // (weekend, holiday or no classes), so parents don't get false absent alerts.
-void runSweep(bool morning) {
+// alerts = false: finishing an old day, so no absent alerts. True if the session had classes.
+bool runSweep(bool morning, bool alerts) {
   bool held = false;
   for (int i = 0; i < sCount; i++) if (morning ? st[i].inM : st[i].inA) held = true;
   if (held) {
     for (int i = 0; i < sCount; i++) {
       if (morning) {
-        if (!st[i].inM) { st[i].sInM = "Absent"; st[i].sOutM = "Absent"; sendParentAlert(1, st[i], true); }
-        else if (!st[i].outM) { st[i].sOutM = "No Time Out"; sendParentAlert(2, st[i], true); }
+        if (!st[i].inM) { st[i].sInM = "Absent"; st[i].sOutM = "Absent"; if (alerts) sendParentAlert(false, st[i], true); }
+        else if (!st[i].outM) st[i].sOutM = "No Time Out";   // recorded, no alert
       } else {
-        if (!st[i].inA) { st[i].sInA = "Absent"; st[i].sOutA = "Absent"; sendParentAlert(1, st[i], false); }
-        else if (!st[i].outA) { st[i].sOutA = "No Time Out"; sendParentAlert(2, st[i], false); }
+        if (!st[i].inA) { st[i].sInA = "Absent"; st[i].sOutA = "Absent"; if (alerts) sendParentAlert(false, st[i], false); }
+        else if (!st[i].outA) st[i].sOutA = "No Time Out";
       }
     }
   }
   if (morning) mSweepDone = true; else aSweepDone = true;
   saveAttendance();
-  updateMonthToday();
+  saveDayMarks();
+  if (!morning) checkAbsentStreaks();   // the day's marks are final now
+  return held;
+}
+
+// A student absent 3 school days in a row: tells the teacher, the parent and guidance.
+void sendStreakAlert(const Student& s) {
+  String date = dateText(dayDate);
+  tgSend(teacherID, "🚨 *3 DAYS ABSENT*\nStudent: " + s.name + "\nLRN: " + s.lrn + "\nAbsent 3 school days in a row (as of " + date + ").", "Markdown");
+  sendToParent(s, "Good day, Parent/Guardian.\nThis is to inform you that your child, " + s.name + " (LRN: " + s.lrn +
+                  "), has been absent for 3 school days in a row (as of " + date + ").\nPlease contact the class adviser. Thank you.");
+  if (guidanceID == "" || guidanceID == teacherID) return;
+  String g = "📋 3-DAY ABSENCE\nStudent: " + s.name + "\nLRN: " + s.lrn;
+  if (gradeLevel != "" || sectionName != "") g += "\nClass: " + classLabel();
+  tgSend(guidanceID, g + "\nAbsent 3 school days in a row (as of " + date + ").", "");
+}
+
+// End of a school day (the day dayDate): alerts once for each student whose absence that day is
+// their 3rd school day in a row. A 4th day in a row doesn't alert again.
+void checkAbsentStreaks() {
+  int y = dayDate / 10000, m = dayDate / 100 % 100, d = dayDate % 100;
+  if (d < 1 || d > 31 || curMonth.year != y || curMonth.month != m || !((curMonth.classDays >> (d - 1)) & 1)) return;
+  bool hasPrev = loadPrevMonth(otherMonth) && otherMonth.year * 12 + otherMonth.month == y * 12 + m - 1;
+  for (int i = 0; i < sCount; i++) {
+    if (absentRun(i, d, hasPrev ? &otherMonth : nullptr) == 3) sendStreakAlert(st[i]);
+  }
 }
 
 void scheduler() {
@@ -1195,8 +1247,8 @@ void scheduler() {
   if (!timeValid) return;
   uint32_t today = todayKey();
   if (today != dayDate) newDay(today);   // new day (also works if the device was off at midnight)
-  if (!mSweepDone && atOrAfter(sweepH_AM, sweepM_AM)) runSweep(true);
-  if (!aSweepDone && atOrAfter(sweepH_PM, sweepM_PM)) runSweep(false);
+  if (!mSweepDone && atOrAfter(sweepH_AM, sweepM_AM)) runSweep(true, true);
+  if (!aSweepDone && atOrAfter(sweepH_PM, sweepM_PM)) runSweep(false, true);
 }
 
 // -------------------- SF2 (EXCEL) REPORT --------------------
@@ -1204,6 +1256,18 @@ int dayOfWeek(int y, int m, int d) {   // 0 = Sunday
   static const int t[] = {0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4};
   if (m < 3) y -= 1;
   return (y + y / 4 - y / 100 + y / 400 + t[m - 1] + d) % 7;
+}
+
+int daysInMonth(int y, int m) {
+  static const uint8_t len[12] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+  if (m < 1 || m > 12) return 0;
+  return m == 2 && y % 4 == 0 && (y % 100 != 0 || y % 400 == 0) ? 29 : len[m - 1];
+}
+
+// Day d gets an SF2 column if it had classes, or (weekdays = true) if it is a Monday to Friday.
+bool sf2Column(const MonthRec& m, int d, bool weekdays) {
+  int dow = dayOfWeek(m.year, m.month, d);
+  return ((m.classDays >> (d - 1)) & 1) || (weekdays && dow != 0 && dow != 6);
 }
 
 void sortByName(int* idx, int n) {
@@ -1223,11 +1287,17 @@ void buildSF2Model(const MonthRec& m) {
   sf2Model.section = sectionName.c_str();
   sf2Model.monthName = (m.month >= 1 && m.month <= 12) ? MONTH_NAMES[m.month - 1] : "";
 
-  for (int d = 1; d <= 31 && sf2Model.nDays < SF2_MAX_DAYS; d++) {
-    if (!(m.classDays & (1UL << (d - 1)))) continue;
-    sf2Model.dayNum[sf2Model.nDays] = d;
-    sf2Model.dayOfWeek[sf2Model.nDays] = dayOfWeek(m.year, m.month, d);
-    sf2Model.nDays++;
+  // Day columns: every Monday to Friday, so the dates show from the 1st like the paper form, plus
+  // any other day that had classes. Only the days that had classes count in the totals.
+  int dim = daysInMonth(m.year, m.month), cols = 0;
+  for (int d = 1; d <= dim; d++) cols += sf2Column(m, d, true);
+  bool weekdays = cols <= SF2_MAX_DAYS;   // more than the form's 25 columns (many Saturday classes): only days with classes
+  for (int d = 1; d <= dim && sf2Model.nDays < SF2_MAX_DAYS; d++) {
+    if (!sf2Column(m, d, weekdays)) continue;
+    int k = sf2Model.nDays++;
+    if ((m.classDays >> (d - 1)) & 1) sf2Model.held |= 1UL << k;
+    sf2Model.dayNum[k] = d;
+    sf2Model.dayOfWeek[k] = dayOfWeek(m.year, m.month, d);
   }
 
   int males[MAX_STUDENTS], females[MAX_STUDENTS], nm = 0, nf = 0;
@@ -1457,6 +1527,7 @@ String dashboardPage() {
   if (unknown > 0) html += "<div class='alert'>" + String(unknown) + " student(s) have no sex set, so the SF2 lists them under MALE. Fix with /setsex in Telegram.</div>";
   if (schoolName == "") html += "<div class='alert'>School details for the SF2 are empty. Fill them in under <a href='/settings/schooldetails'>Settings &gt; School Details</a>.</div>";
   if (botToken == "") html += "<div class='alert'>The Telegram bot is not set up yet.</div>";
+  if (guidanceID == "") html += "<div class='alert'>The guidance Telegram ID is not set yet. Add it under <a href='/settings/telegrambot'>Settings &gt; Telegram Bot</a>.</div>";
   if (WiFi.status() != WL_CONNECTED) html += "<div class='alert err'>Not connected to WiFi. Go to <a href='/settings/wifi'>Settings &gt; WiFi</a>.</div>";
 
   html += "<section class='tiles'>";
@@ -1546,7 +1617,7 @@ String settingsMenuPage() {
   html += "<main class='wrap narrow'><span class='eyebrow'>Settings</span><h1>Settings</h1>";
   html += "<p class='sub'>Saving changes needs the admin PIN.</p><div class='menu'>";
   html += "<a class='mi' href='/settings/schooldetails'><span class='ic'>" ICON_SCHOOL "</span><span><b>School Details</b><small>School ID, name, school year, grade and section for the SF2</small></span></a>";
-  html += "<a class='mi' href='/settings/telegrambot'><span class='ic'>" ICON_SEND "</span><span><b>Telegram Bot</b><small>Teacher Telegram ID for reports and commands</small></span></a>";
+  html += "<a class='mi' href='/settings/telegrambot'><span class='ic'>" ICON_SEND "</span><span><b>Telegram Bot</b><small>Teacher and guidance Telegram IDs for reports and alerts</small></span></a>";
   html += "<a class='mi' href='/settings/wifi'><span class='ic'>" ICON_WIFI "</span><span><b>WiFi</b><small>WiFi name and password the device connects to</small></span></a>";
   html += "</div><a class='btn ghost block' href='/'>Back to Dashboard</a></main></body></html>";
   return html;
@@ -1571,9 +1642,12 @@ String telegramBotPage(const String& msg) {
   html += "<form method='POST' action='/settings/telegrambot'>";
   html += "<label>Teacher Telegram ID</label>";
   html += "<input name='teacher' value='" + teacherID + "' inputmode='numeric'>";
+  html += "<label>Guidance Telegram ID</label>";
+  html += "<input name='guidance' value='" + guidanceID + "' inputmode='numeric' required>";
   html += pinField();
   html += "<button class='btn block' type='submit'>Save and Restart</button></form>";
-  html += "<p class='hint'>To get the teacher ID, open the bot in Telegram and send /myid.</p>";
+  html += "<p class='hint'>To get a Telegram ID, open the bot in Telegram, tap Start and send /myid. "
+          "The guidance account only gets an alert when a student is absent 3 school days in a row.</p>";
   html += backToSettings();
   return html;
 }
@@ -1693,17 +1767,24 @@ void setupWeb() {
       return;
     }
     String newTeacher = server.arg("teacher"); newTeacher.trim();
+    String newGuidance = server.arg("guidance"); newGuidance.trim();
 
-    if (!isValidChatID(newTeacher)) {
-      server.send(200, "text/html", telegramBotPage("Teacher ID must be numbers only."));
+    if (!isValidChatID(newTeacher) || !isValidChatID(newGuidance)) {   // both are required
+      server.send(200, "text/html", telegramBotPage("Both Telegram IDs must be filled in, numbers only. Nothing was changed."));
       return;
     }
 
+    bool guidanceChanged = newGuidance != guidanceID;
     teacherID = newTeacher;
+    guidanceID = newGuidance;
     saveBotSettings();
 
     server.send(200, "text/html", restartPage("The system is restarting with the new bot settings. This page will go back to the dashboard in 20 seconds."));
     show("SETTINGS", "Bot saved.", "Restarting...");
+    if (guidanceChanged) {   // proves the new guidance ID works; sent before the restart
+      tgSend(guidanceID, "✅ This account will now get an alert when a student is absent 3 school days in a row.", "");
+      tgFlush(8000);
+    }
     delay(1500);
     ESP.restart();
   });
